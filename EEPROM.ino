@@ -1,11 +1,35 @@
 #include <avr/eeprom.h>
 
-#define EEPROM_CONF_VERSION 161
 
+uint8_t calculate_sum(uint8_t *cb , uint8_t siz) {
+  uint8_t sum=0x55;  // checksum init
+  while(--siz) sum += *cb++;  // calculate checksum (without checksum byte)
+  return sum;
+}
+
+void readGlobalSet() {
+  eeprom_read_block((void*)&global_conf, (void*)0, sizeof(global_conf));
+  if(calculate_sum((uint8_t*)&global_conf, sizeof(global_conf)) != global_conf.checksum) {
+    global_conf.currentSet = 0;
+    global_conf.accZero[ROLL] = 5000;    // for config error signalization
+  }
+}
+ 
 void readEEPROM() {
   uint8_t i;
-
-  eeprom_read_block((void*)&conf, (void*)0, sizeof(conf));
+  #ifdef MULTIPLE_CONFIGURATION_PROFILES
+    if(global_conf.currentSet>2) global_conf.currentSet=0;
+  #else
+    global_conf.currentSet=0;
+  #endif
+  eeprom_read_block((void*)&conf, (void*)(global_conf.currentSet * sizeof(conf) + sizeof(global_conf)), sizeof(conf));
+  if(calculate_sum((uint8_t*)&conf, sizeof(conf)) != conf.checksum) {
+    blinkLED(6,100,3);    
+    #if defined(BUZZER)
+      alarmArray[7] = 3;
+    #endif
+    LoadDefaults();                 // force load defaults 
+  }
   for(i=0;i<6;i++) {
     lookupPitchRollRC[i] = (2500+conf.rcExpo8*(i*i-25))*i*(int32_t)conf.rcRate8/2500;
   }
@@ -19,7 +43,7 @@ void readEEPROM() {
   }
 
   #if defined(POWERMETER)
-    pAlarm = (uint32_t) conf.powerTrigger1 * (uint32_t) PLEVELSCALE * (uint32_t) PLEVELDIV; // need to cast before multiplying
+    pAlarm = (uint32_t) conf.powerTrigger1 * (uint32_t) PLEVELSCALE * (uint32_t) conf.pleveldiv; // need to cast before multiplying
   #endif
   #ifdef FLYING_WING
     #ifdef LCD_CONF
@@ -40,21 +64,44 @@ void readEEPROM() {
   #if GPS
     if (f.I2C_INIT_DONE) GPS_set_pids();
   #endif
+  #ifdef POWERMETER_HARD
+    conf.pleveldivsoft = PLEVELDIVSOFT;
+  #endif
+  #ifdef POWERMETER_SOFT
+     conf.pleveldivsoft = conf.pleveldiv;
+  #endif
 }
 
+void writeGlobalSet(uint8_t b) {
+  global_conf.checksum = calculate_sum((uint8_t*)&global_conf, sizeof(global_conf));
+  eeprom_write_block((const void*)&global_conf, (void*)0, sizeof(global_conf));
+  if (b == 1) blinkLED(15,20,1);
+  #if defined(BUZZER)
+    alarmArray[7] = 1; 
+  #endif
+
+}
+ 
 void writeParams(uint8_t b) {
-  conf.checkNewConf = EEPROM_CONF_VERSION; // make sure we write the current version into eeprom
-  eeprom_write_block((const void*)&conf, (void*)0, sizeof(conf));
+  #ifdef MULTIPLE_CONFIGURATION_PROFILES
+    if(global_conf.currentSet>2) global_conf.currentSet=0;
+  #else
+    global_conf.currentSet=0;
+  #endif
+  conf.checksum = calculate_sum((uint8_t*)&conf, sizeof(conf));
+  eeprom_write_block((const void*)&conf, (void*)(global_conf.currentSet * sizeof(conf) + sizeof(global_conf)), sizeof(conf));
   readEEPROM();
   if (b == 1) blinkLED(15,20,1);
+  #if defined(BUZZER)
+    alarmArray[7] = 1; //beep if loaded from gui or android
+  #endif
 }
 
-void checkFirstTime() {
-  if (EEPROM_CONF_VERSION == conf.checkNewConf) return;
+void LoadDefaults() {
   conf.P8[ROLL]  = 40;  conf.I8[ROLL] = 30; conf.D8[ROLL]  = 23;
   conf.P8[PITCH] = 40; conf.I8[PITCH] = 30; conf.D8[PITCH] = 23;
   conf.P8[YAW]   = 85;  conf.I8[YAW]  = 45;  conf.D8[YAW]  = 0;
-  conf.P8[PIDALT]   = 16; conf.I8[PIDALT]   = 15; conf.D8[PIDALT]   = 7;
+  conf.P8[PIDALT]   = 50; conf.I8[PIDALT]   = 20; conf.D8[PIDALT]   = 30;
   
   conf.P8[PIDPOS]  = POSHOLD_P * 100;     conf.I8[PIDPOS]    = POSHOLD_I * 100;       conf.D8[PIDPOS]    = 0;
   conf.P8[PIDPOSR] = POSHOLD_RATE_P * 10; conf.I8[PIDPOSR]   = POSHOLD_RATE_I * 100;  conf.D8[PIDPOSR]   = POSHOLD_RATE_D * 1000;
@@ -95,6 +142,28 @@ void checkFirstTime() {
       uint8_t s[3] = GYRO_SMOOTHING;
       for(uint8_t i=0;i<3;i++) conf.Smoothing[i] = s[i];
     }
+  #endif
+  #if defined (FAILSAFE)
+    conf.failsafe_throttle = FAILSAFE_THROTTLE;
+  #endif
+  #ifdef VBAT
+    conf.vbatscale = VBATSCALE;
+    conf.vbatlevel1_3s = VBATLEVEL1_3S;
+    conf.vbatlevel2_3s = VBATLEVEL2_3S;
+    conf.vbatlevel_crit = VBATLEVEL_CRIT;
+    conf.no_vbat = NO_VBAT;
+  #endif
+  #ifdef POWERMETER
+    conf.psensornull = PSENSORNULL;
+    //conf.pleveldivsoft = PLEVELDIVSOFT; // not neccessary; this gets set in the eeprom read function
+    conf.pleveldiv = PLEVELDIV;
+    conf.pint2ma = PINT2mA;
+  #endif
+  #ifdef CYCLETIME_FIXATED
+    conf.cycletime_fixated = CYCLETIME_FIXATED;
+  #endif
+  #ifdef MMGYRO
+    conf.mmgyro = MMGYRO;
   #endif
   writeParams(0); // this will also (p)reset checkNewConf with the current version number again.
 }
